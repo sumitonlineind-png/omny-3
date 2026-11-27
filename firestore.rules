@@ -1,0 +1,63 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+
+    // Admins are added by hand in the Firebase console. Nobody can write here from the app.
+    match /admins/{id} {
+      allow read: if signedIn() && request.auth.uid == id;
+      allow write: if false;
+    }
+    match /profiles/{id} {
+      allow read: if signedIn() && (request.auth.uid == id || isAdmin());
+      allow create, update: if signedIn() && request.auth.uid == id
+        && request.resource.data.keys().hasOnly(['n','c','d','e','ts'])
+        && request.resource.data.n is string && request.resource.data.n.size() > 0 && request.resource.data.n.size() <= 80;
+      allow delete: if isAdmin();
+    }
+    match /news/{id}      { allow read: if true; allow write: if isAdmin(); }
+    match /materials/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /tests/{id}     { allow read: if true; allow write: if isAdmin(); }
+
+    // AI Tutor daily counter: one document per student per day. It can only go up by one at a time.
+    match /usage/{id} {
+      allow read: if signedIn() && id.matches(request.auth.uid + '_.*');
+      allow create: if signedIn() && id.matches(request.auth.uid + '_.*')
+        && request.resource.data.keys().hasOnly(['n']) && request.resource.data.n == 1;
+      allow update: if signedIn() && id.matches(request.auth.uid + '_.*')
+        && request.resource.data.n == resource.data.n + 1 && request.resource.data.n <= 30;
+      allow delete: if false;
+    }
+
+    match /doubts/{postId} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['t','d','s','a','c','uid','ts'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.t is string && request.resource.data.t.size() > 0 && request.resource.data.t.size() <= 200
+        && request.resource.data.d is string && request.resource.data.d.size() <= 2000
+        && request.resource.data.s in ['Maths','Science','Reasoning'];
+      allow update: if false;
+      allow delete: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+
+      match /replies/{replyId} {
+        allow read: if true;
+        allow create: if signedIn()
+          && request.resource.data.keys().hasOnly(['pid','t','a','c','uid','voters','ts'])
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.pid == postId
+          && request.resource.data.voters.size() == 0
+          && request.resource.data.t is string && request.resource.data.t.size() > 0 && request.resource.data.t.size() <= 2000;
+        // Upvote: anyone signed in may add or remove only their own uid in "voters" (not on their own reply).
+        allow update: if signedIn() && resource.data.uid != request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['voters'])
+          && request.resource.data.voters.toSet().difference(resource.data.voters.toSet()).hasOnly([request.auth.uid])
+          && resource.data.voters.toSet().difference(request.resource.data.voters.toSet()).hasOnly([request.auth.uid]);
+        allow delete: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      }
+    }
+    // Lets the page read all replies with one collection-group query.
+    match /{path=**}/replies/{replyId} { allow read: if true; }
+  }
+}
